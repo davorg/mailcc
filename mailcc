@@ -1,0 +1,105 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+use Data::Dumper;
+
+use URI;
+use Web::Scraper;
+use XML::Feed;
+use DateTime;
+use DateTime::Format::Strptime;
+use Encode;
+
+# binmode STDOUT, ':utf8';
+
+my $search_url = 'http://www.dailymail.co.uk/home/search.html' .
+                 '?sel=site&searchPhrase=corrections+and+clarifications' .
+                 '&orderBy=dateDesc';
+                 
+my $search = scraper {
+    process 'div.sch-result', 'articles[]' => scraper {
+        process 'h3.sch-res-title', title => 'TEXT';
+        process 'h4.sch-res-info', date => 'TEXT';
+        process 'a', link => '@href';
+    };
+};
+
+my $entries = scraper {
+    process '//p/font | //div[@class="pageBreak"]', 'paras[]' => 'HTML';
+    result 'paras';
+};
+
+my $dt_parser = DateTime::Format::Strptime->new(
+    pattern => '%d/%m/%Y %H:%M:%S',
+    time_zone => 'Europe/London',
+);
+
+my $res = $search->scrape( URI->new($search_url) );
+
+my $feed = XML::Feed->new('Atom');
+$feed->title('Mail Corrections and Clarifications');
+$feed->modified(DateTime->now);
+$feed->id('http://fellowtravellers.org.uk/mailcc/');
+# $feed->id($feed->self_link);
+
+foreach my $a (@{$res->{articles}}) {
+    next unless $a->{title} =~ /^Corrections/;
+
+    my $i = 1;
+
+    my $dt = $dt_parser->parse_datetime($a->{date});
+
+    my @paras;
+
+    foreach (@{ $entries->scrape($a->{link}) }) {
+        # warn "$_\n";
+        next if /corrections\@dailymail\.co\.uk/;
+        
+        if (length == 1) {
+            my $link = $a->{link} . '#corr-' . $i++;
+            $feed->add_entry(new_entry($link, $dt, @paras));
+            @paras = ();
+         } else {
+             # Kludge
+             s/\x{2018}/'/g;
+             s/\x{2019}/'/g;
+             # Encode::from_to($_, 'iso-8859-1', 'utf8');
+             push @paras, decode('iso-8859-1', $_);
+         }
+#        print ord, "\n" if length == 1;
+#        print "$_\n";
+    }
+
+    if (@paras) {
+        my $link = $a->{link} . '#corr-' . $i++;
+        $feed->add_entry(new_entry($link, $dt, @paras));
+        @paras = ();
+    }
+    
+#    print $dt->strftime('%z') . "\n";
+}
+
+print $feed->as_xml;
+
+sub new_entry {
+    my ($link, $dt, @paras) = @_;
+
+    my $e = XML::Feed::Entry->new;
+    my $title;
+    if (index($paras[0], '.') > -1) {
+        $title = substr($paras[0], 0, index($paras[0], '.'));
+    } else {
+        $title = $paras[0];
+    }
+    $e->title($title);
+    $e->link($link);
+    $e->content(join "\n", @paras);
+    $e->author('Mail Corrections');
+    $e->issued($dt);
+    $e->modified($dt);
+    $e->id($link);
+    
+    return $e;
+}
